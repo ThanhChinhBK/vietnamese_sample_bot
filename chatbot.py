@@ -29,8 +29,11 @@ import tensorflow as tf
 
 from model import ChatBotModel
 
-import data
+import utils
 
+tf.flags.DEFINE_integer("max_encode_length", 16, "")
+tf.flags.DEFINE_integer("max_decode_length", 19, "")
+FLAGS = tf.flags.FLAGS
 def _get_random_bucket(train_buckets_scale):
     """ Get a random bucket from which to choose a training sample """
     rand = random.random()
@@ -50,12 +53,12 @@ def _assert_lengths(encoder_size, decoder_size, encoder_inputs, decoder_inputs, 
         raise ValueError("Weights length must be equal to the one in bucket,"
                        " %d != %d." % (len(decoder_masks), decoder_size))
 
-def run_step(sess, model, encoder_inputs, decoder_inputs, decoder_masks, bucket_id, forward_only):
+def run_step(sess, model, encoder_inputs, decoder_inputs, decoder_masks, forward_only):
     """ Run one step in training.
     @forward_only: boolean value to decide whether a backward path should be created
     forward_only is set to True when you just want to evaluate on the test set,
     or when you want to the bot to be in chat mode. """
-    encoder_size, decoder_size = config.BUCKETS[bucket_id]
+    encoder_size, decoder_size = FLAGS.max_encode_length, FLAGS.max_decode_length
     _assert_lengths(encoder_size, decoder_size, encoder_inputs, decoder_inputs, decoder_masks)
 
     # input feed: encoder inputs, decoder inputs, target_weights, as provided.
@@ -71,13 +74,13 @@ def run_step(sess, model, encoder_inputs, decoder_inputs, decoder_masks, bucket_
 
     # output feed: depends on whether we do a backward step or not.
     if not forward_only:
-        output_feed = [model.train_ops[bucket_id],  # update op that does SGD.
-                       model.gradient_norms[bucket_id],  # gradient norm.
-                       model.losses[bucket_id]]  # loss for this batch.
+        output_feed = [model.train_ops,  # update op that does SGD.
+                       model.gradient_norms,  # gradient norm.
+                       model.losses[0]]  # loss for this batch.
     else:
-        output_feed = [model.losses[bucket_id]]  # loss for this batch.
+        output_feed = [model.losses[0]]  # loss for this batch.
         for step in range(decoder_size):  # output logits.
-            output_feed.append(model.outputs[bucket_id][step])
+            output_feed.append(model.outputs[0][step])
 
     outputs = sess.run(output_feed, input_feed)
     if not forward_only:
@@ -90,16 +93,11 @@ def _get_buckets():
     train_buckets_scale is the inverval that'll help us 
     choose a random bucket later on.
     """
-    test_buckets = data.load_data('test_ids.enc', 'test_ids.dec')
-    data_buckets = data.load_data('train_ids.enc', 'train_ids.dec')
-    train_bucket_sizes = [len(data_buckets[b]) for b in range(len(config.BUCKETS))]
-    print("Number of samples in each bucket:\n", train_bucket_sizes)
-    train_total_size = sum(train_bucket_sizes)
-    # list of increasing numbers from 0 to 1 that we'll use to select a bucket.
-    train_buckets_scale = [sum(train_bucket_sizes[:i + 1]) / train_total_size
-                           for i in range(len(train_bucket_sizes))]
-    print("Bucket scale:\n", train_buckets_scale)
-    return test_buckets, data_buckets, train_buckets_scale
+    test_buckets = utils.load_data('test.que', 'test.ans', FLAGS.max_encode_length, FLAGS.max_decode_length)
+    data_buckets = utils.load_data('train.que', 'train.ans', FLAGS.max_encode_length, FLAGS.max_decode_length)
+    train_total_size = len(data_buckets)
+    print("loaded {} of sentences".format(train_total_size))
+    return test_buckets, data_buckets
 
 def _get_skip_step(iteration):
     """ How many steps should the model train before it saves all the weights. """
@@ -109,7 +107,7 @@ def _get_skip_step(iteration):
 
 def _check_restore_parameters(sess, saver):
     """ Restore the previously trained parameters if there are any. """
-    ckpt = tf.train.get_checkpoint_state(os.path.dirname(config.CPT_PATH + '/checkpoint'))
+    ckpt = tf.train.get_checkpoint_state(os.path.dirname("runs" + '/checkpoint'))
     if ckpt and ckpt.model_checkpoint_path:
         print("Loading parameters for the Chatbot")
         saver.restore(sess, ckpt.model_checkpoint_path)
@@ -118,23 +116,19 @@ def _check_restore_parameters(sess, saver):
 
 def _eval_test_set(sess, model, test_buckets):
     """ Evaluate on the test set. """
-    for bucket_id in range(len(config.BUCKETS)):
-        if len(test_buckets[bucket_id]) == 0:
-            print("  Test: empty bucket %d" % (bucket_id))
-            continue
-        start = time.time()
-        encoder_inputs, decoder_inputs, decoder_masks = data.get_batch(test_buckets[bucket_id], 
-                                                                        bucket_id,
-                                                                        batch_size=config.BATCH_SIZE)
-        _, step_loss, _ = run_step(sess, model, encoder_inputs, decoder_inputs, 
-                                   decoder_masks, bucket_id, True)
-        print('Test bucket {}: loss {}, time {}'.format(bucket_id, step_loss, time.time() - start))
+    
+    start = time.time()
+    encoder_inputs, decoder_inputs, decoder_masks = utils.get_batch(test_buckets, 
+                                                                   batch_size=config.BATCH_SIZE)
+    _, step_loss, _ = run_step(sess, model, encoder_inputs, decoder_inputs, 
+                               decoder_masks, True)
+    print('Test : loss {}, time {}'.format(step_loss, time.time() - start))
 
 def train():
     """ Train the bot """
-    test_buckets, data_buckets, train_buckets_scale = _get_buckets()
+    test_buckets, data_buckets  = _get_buckets()
     # in train mode, we need to create the backward path, so forwrad_only is False
-    model = ChatBotModel(False, config.BATCH_SIZE)
+    model = ChatBotModel(False, 256)
     model.build_graph()
 
     saver = tf.train.Saver()
@@ -148,12 +142,12 @@ def train():
         total_loss = 0
         while True:
             skip_step = _get_skip_step(iteration)
-            bucket_id = _get_random_bucket(train_buckets_scale)
-            encoder_inputs, decoder_inputs, decoder_masks = data.get_batch(data_buckets[bucket_id], 
-                                                                           bucket_id,
-                                                                           batch_size=config.BATCH_SIZE)
+            encoder_inputs, decoder_inputs, decoder_masks = utils.get_batch(data_buckets,
+                                                                            FLAGS.max_encode_length,
+                                                                            FLAGS.max_decode_length,
+                                                                            batch_size=256)
             start = time.time()
-            _, step_loss, _ = run_step(sess, model, encoder_inputs, decoder_inputs, decoder_masks, bucket_id, False)
+            _, step_loss, _ = run_step(sess, model, encoder_inputs, decoder_inputs, decoder_masks, False)
             total_loss += step_loss
             iteration += 1
 
@@ -161,7 +155,7 @@ def train():
                 print('Iter {}: loss {}, time {}'.format(iteration, total_loss/skip_step, time.time() - start))
                 start = time.time()
                 total_loss = 0
-                saver.save(sess, os.path.join(config.CPT_PATH, 'chatbot'), global_step=model.global_step)
+                saver.save(sess, os.path.join("runs", 'chatbot'), global_step=model.global_step)
                 if iteration % (10 * skip_step) == 0:
                     # Run evals on development set and print their loss
                     _eval_test_set(sess, model, test_buckets)
@@ -245,14 +239,10 @@ def main():
     parser.add_argument('--mode', choices={'train', 'chat'},
                         default='train', help="mode. if not specified, it's in the train mode")
     args = parser.parse_args()
-
-    if not os.path.isdir(config.PROCESSED_PATH):
-        data.prepare_raw_data()
-        data.process_data()
     print('Data ready!')
     # create checkpoints folder if there isn't one already
-    data.make_dir(config.CPT_PATH)
-
+    if not os.path.isdir("runs"):
+        os.mkdir("runs")
     if args.mode == 'train':
         train()
     elif args.mode == 'chat':
