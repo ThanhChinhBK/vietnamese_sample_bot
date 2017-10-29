@@ -3,6 +3,7 @@ import re
 import random
 import argparse
 from nltk.tokenize import sent_tokenize
+from underthesea import word_sent
 
 
 def read_srt(fname, sents):    
@@ -14,11 +15,14 @@ def read_srt(fname, sents):
             try: line.decode('utf-8')
             except:
                 continue
+            line = re.sub(b'<.*>', b'', line)
             if line.strip() == b"":
                 continue
             if pattern.match(line.strip().decode('utf-8')) or line.strip().isdigit():
                 continue
-            line_sents = sent_tokenize(line.strip().decode('utf-8'))
+
+            try: line_sents = sent_tokenize(line.strip().decode('utf-8'))
+            except: print(line.decode("utf-8"))
             if len(line_sents) == 0: continue
             sents.append(line_sents) #senteces decoded
 
@@ -40,8 +44,12 @@ def question_answers(sents):
     ans = []
     for i in range(len(sents) - 1):
         if sents[i][-1].endswith("?") and not sents[i+1][0].endswith("?"):
-            ques.append(sents[i][-1].encode("utf-8"))
-            ans.append(sents[i+1][-0].encode("utf-8"))
+            try: 
+                ques.append(word_sent(sents[i][-1], format="text").encode("utf-8"))
+                ans.append(word_sent(sents[i+1][-0], format="text").encode("utf-8"))
+            except:
+                print(sents[i][-1])
+                print(sents[i+1][0])
     return ques, ans
 
 def basic_tokenizer(line, normalize_digits=True):
@@ -134,11 +142,11 @@ if __name__ == "__main__":
             read_srt(os.path.join("data", fname), sents)
         if fname.endswith(".ass"):
             read_ass(os.path.join("data", fname), sents)
-
+            #break
     print("got {} lines".format(len(sents)))
     ques, ans = question_answers(sents)
     write_raw_data(ques, ans, "preprocess/")
     print("got {} pairs of question-answer".format(len(ques)))
     vocab = build_vocab(ques + ans, "preprocess/")
     print("get {} words in vocab".format(len(vocab)))
-    prepare_data(ques, ans, vocab, args.test_size)
+    #prepare_data(ques, ans, vocab, args.test_size)
